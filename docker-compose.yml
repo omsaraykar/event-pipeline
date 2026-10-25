@@ -1,0 +1,111 @@
+services:
+  kafka:
+    image: confluentinc/cp-kafka:7.7.1
+    hostname: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://0.0.0.0:9092,CONTROLLER://kafka:29093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server kafka:29092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+
+  kafka-init:
+    image: confluentinc/cp-kafka:7.7.1
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command: >
+      "kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists
+      --topic events.raw --partitions 6 --replication-factor 1 &&
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists
+      --topic events.dlq --partitions 1 --replication-factor 1"
+
+  mysql:
+    image: mysql:8.4
+    hostname: mysql
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-events}
+      MYSQL_USER: ${MYSQL_USER:-events}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-events_password}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_password}
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p$${MYSQL_ROOT_PASSWORD} --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7.4-alpine
+    hostname: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  consumer:
+    build:
+      context: ./consumer
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      MYSQL_HOST: mysql
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-events}
+      MYSQL_USER: ${MYSQL_USER:-events}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-events_password}
+      REDIS_HOST: redis
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  producer:
+    build:
+      context: ./producer
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      EVENT_COUNT: ${EVENT_COUNT:-1000}
+      EVENT_RATE: ${EVENT_RATE:-10}
+      MALFORMED_RATE: ${MALFORMED_RATE:-0.02}
+      INVALID_RATE: ${INVALID_RATE:-0.02}
+      DUPLICATE_RATE: ${DUPLICATE_RATE:-0.05}
+      OUT_OF_ORDER_RATE: ${OUT_OF_ORDER_RATE:-0.02}
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    profiles: ["demo"]
+
+volumes:
+  kafka-data:
+  mysql-data:
+  redis-data:
